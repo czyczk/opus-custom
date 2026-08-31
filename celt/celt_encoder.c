@@ -43,6 +43,7 @@
 #include "modes.h"
 #include "entcode.h"
 #include "quant_bands.h"
+#include "audiff_knobs.h"
 #include "rate.h"
 #include "stack_alloc.h"
 #include "mathops.h"
@@ -85,6 +86,10 @@ struct OpusCustomEncoder {
    int enable_qext;
    int qext_scale;
 #endif
+
+   /* audiff v04: adapt4 state kept outside the reset-cleared region. */
+   float audiff_ic_ema;
+   int audiff_exit_state;
 
    /* Everything beyond this point gets cleared on a reset */
 #define ENCODER_RESET_START rng
@@ -219,6 +224,8 @@ static int opus_custom_encoder_init_arch(CELTEncoder *st, const CELTMode *mode,
    st->force_intra  = 0;
    st->complexity = 5;
    st->lsb_depth=24;
+   st->audiff_ic_ema = 1.0f;
+   st->audiff_exit_state = 0;
 
 #ifdef ENABLE_QEXT
    if (st->mode->Fs == 96000 && (mode->shortMdctSize==240 || mode->shortMdctSize==180)) st->qext_scale = 2;
@@ -2403,6 +2410,45 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
       st->intensity = hysteresis_decision((opus_val16)(equiv_rate/1000),
             intensity_thresholds, intensity_histeresis, 21, st->intensity);
       st->intensity = IMIN(end,IMAX(start, st->intensity));
+      if (CC == 2 && audiff_knob_adapt_intensity() > 0 && st->intensity < end)
+      {
+         /* audiff v04 adapt4: content-adaptive intensity-stereo exit.
+            Predict intensity IC error and leave intensity stereo on
+            de-correlated wide-band content. */
+         float *pic_ema = &st->audiff_ic_ema;
+         int *pexit_state = &st->audiff_exit_state;
+         double fc = (double)(mode->eBands[st->intensity]<<LM) * 24000.0 / N;
+         double w0 = 2.0*3.141592653589793*fc/48000.0;
+         double cw = cos(w0), sw = sin(w0);
+         double alpha = sw*0.70710678;
+         double a0 = 1.0+alpha;
+         double b0 = ((1.0+cw)*0.5)/a0, b1 = (-(1.0+cw))/a0, b2 = ((1.0+cw)*0.5)/a0;
+         double a1 = (-2.0*cw)/a0, a2 = (1.0-alpha)/a0;
+         const celt_sig *x0 = in;
+         const celt_sig *x1 = in + (N+overlap);
+         double sx=0, sy=0, sxy=0;
+         double xL1=0, xL2=0, yL1=0, yL2=0, xR1=0, xR2=0, yR1=0, yR2=0;
+         int j, len = N+overlap;
+         double thr = audiff_knob_adapt_intensity()/1000.0;
+         for (j=0;j<len;j++)
+         {
+            double xl = (double)x0[j], xr = (double)x1[j];
+            double yl = b0*xl + b1*xL1 + b2*xL2 - a1*yL1 - a2*yL2;
+            double yr = b0*xr + b1*xR1 + b2*xR2 - a1*yR1 - a2*yR2;
+            xL2=xL1; xL1=xl; yL2=yL1; yL1=yl;
+            xR2=xR1; xR1=xr; yR2=yR1; yR1=yr;
+            if (j>=overlap) { double w=yl*yl+yr*yr; sx+=w*yl*yl; sy+=w*yr*yr; sxy+=w*yl*yr; }
+         }
+         if (sx>1e-12 && sy>1e-12)
+         {
+            double ic = sxy/sqrt(sx*sy);
+            *pic_ema = 0.7f*(*pic_ema) + 0.3f*(float)ic;
+            if (!*pexit_state && *pic_ema < thr-0.05) *pexit_state = 1;
+            else if (*pexit_state && *pic_ema > thr+0.05) *pexit_state = 0;
+         }
+         if (*pexit_state)
+            st->intensity = end;
+      }
    }
 
    alloc_trim = 5;
