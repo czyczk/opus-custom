@@ -1613,7 +1613,7 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
       int constrained_vbr, opus_val16 stereo_saving, int tot_boost,
       opus_val16 tf_estimate, int pitch_change, celt_glog maxDepth,
       int lfe, int has_surround_mask, celt_glog surround_masking,
-      celt_glog temporal_vbr ARG_QEXT(int enable_qext))
+      celt_glog temporal_vbr, float audiff_hf_cur ARG_QEXT(int enable_qext))
 {
    /* The target rate in 8th bits per frame */
    opus_int32 target;
@@ -1657,7 +1657,32 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
    target += tot_boost-(19<<LM);
    /* Apply transient boost, compensating for average boost. */
    tf_calibration = QCONST16(0.044f,14);
-   target += (opus_int32)SHL32(MULT16_32_Q15(tf_estimate-tf_calibration, target),1);
+   {
+      /* audiff v04: scale the transient boost and apply the sustain gate.
+         Continuous noise frames keep the full boost; impulsive transient
+         frames are scaled by AUDIFF_VBR_TBOOST. */
+      static float hf_ema = 0.0f;
+      static float audiff_carry = 0.0f;
+      float scale = audiff_knob_vbr_tboost()/100.0f;
+      opus_int32 boost_added;
+      if (audiff_knob_vbr_tdecay() > 0)
+      {
+         target += (opus_int32)audiff_carry;
+         audiff_carry = 0.0f;
+      }
+      if (audiff_knob_sustain_gate())
+      {
+         float cur = audiff_hf_cur;
+         if (hf_ema > 0 && cur < (audiff_knob_sustain_ratio()/100.0f)*hf_ema)
+            scale = 1.0f;
+         hf_ema = 0.9f*hf_ema + 0.1f*cur;
+      }
+      boost_added = (opus_int32)(scale *
+          (float)(opus_int32)SHL32(MULT16_32_Q15(tf_estimate-tf_calibration, target),1));
+      target += boost_added;
+      if (audiff_knob_vbr_tdecay() > 0)
+         audiff_carry = boost_added * (audiff_knob_vbr_tdecay()/100.0f);
+   }
 
 #ifndef DISABLE_FLOAT_API
    /* Apply tonality boost */
@@ -1754,6 +1779,7 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
    celt_glog *oldBandE, *oldLogE, *oldLogE2, *energyError;
    int shortBlocks=0;
    int isTransient=0;
+   float audiff_hf_energy_cur=0.0f;
    const int CC = st->channels;
    const int C = st->stream_channels;
    int LM, M;
@@ -2074,6 +2100,26 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
    } else {
       isTransient = 0;
       transient_got_disabled=1;
+   }
+
+   /* audiff v04: current-frame HP5k energy, used by the sustain gate in
+      compute_vbr.  Inert when AUDIFF_TBOOST_SUSTAIN_GATE is unset. */
+   if (audiff_knob_sustain_gate())
+   {
+      double w0 = 2.0*3.141592653589793*(5000.0/48000.0);
+      double cw = cos(w0), swv = sin(w0), alpha = swv*0.70710678, a0 = 1.0+alpha;
+      double b0 = ((1.0+cw)*0.5)/a0, b1 = (-(1.0+cw))/a0, b2 = b0;
+      double a1 = (-2.0*cw)/a0, a2 = (1.0-alpha)/a0;
+      double x1=0, x2=0, y1=0, y2=0, e=0.0;
+      int j;
+      for (j=overlap;j<N+overlap;j++)
+      {
+         double x = (double)in[j] + (CC==2 ? (double)in[N+overlap+j] : 0.0);
+         double y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
+         x2=x1; x1=x; y2=y1; y1=y;
+         e += y*y;
+      }
+      audiff_hf_energy_cur = (float)e;
    }
 
    ALLOC(freq, CC*N, celt_sig); /**< Interleaved signal MDCTs */
@@ -2505,7 +2551,7 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
            st->lastCodedBands, C, st->intensity, st->constrained_vbr,
            st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,
            st->lfe, st->energy_mask!=NULL, surround_masking,
-           temporal_vbr ARG_QEXT(st->enable_qext));
+           temporal_vbr, audiff_hf_energy_cur ARG_QEXT(st->enable_qext));
      } else {
         target = base_target;
         /* Tonal frames (offset<100) need more bits than noisy (offset>100) ones. */
@@ -2595,7 +2641,7 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
                   st->lastCodedBands, C, st->intensity, st->constrained_vbr,
                   st->stereo_saving, tot_boost, tf_estimate2, pitch_change, maxDepth,
                   st->lfe, st->energy_mask!=NULL, surround_masking,
-                  temporal_vbr ARG_QEXT(st->enable_qext));
+                  temporal_vbr, audiff_hf_energy_cur ARG_QEXT(st->enable_qext));
             target += tell;
          }
          scale = PSHR32(toneishness,14);
