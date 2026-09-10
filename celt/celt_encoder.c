@@ -1660,11 +1660,15 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
    {
       /* audiff v04: scale the transient boost and apply the sustain gate.
          Continuous noise frames keep the full boost; impulsive transient
-         frames are scaled by AUDIFF_VBR_TBOOST. */
+         frames are scaled by AUDIFF_VBR_TBOOST.  The knob is inert below
+         128 kb/s and never scales a negative boost; from 128 to 256 kb/s
+         the scaling ramps in linearly (tboost_ramp). */
       static float hf_ema = 0.0f;
       static float audiff_carry = 0.0f;
+      const opus_int32 tboost_ramp_lo = 128000;
+      const opus_int32 tboost_ramp_hi = 256000;
       float scale = audiff_knob_vbr_tboost()/100.0f;
-      opus_int32 boost_added;
+      opus_int32 raw_boost, boost_added;
       if (audiff_knob_vbr_tdecay() > 0)
       {
          target += (opus_int32)audiff_carry;
@@ -1677,8 +1681,17 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
             scale = 1.0f;
          hf_ema = 0.9f*hf_ema + 0.1f*cur;
       }
-      boost_added = (opus_int32)(scale *
-          (float)(opus_int32)SHL32(MULT16_32_Q15(tf_estimate-tf_calibration, target),1));
+      raw_boost = (opus_int32)SHL32(MULT16_32_Q15(tf_estimate-tf_calibration, target),1);
+      if (bitrate >= tboost_ramp_lo && raw_boost >= 0)
+      {
+         float tboost_ramp = (float)(bitrate-tboost_ramp_lo)/(tboost_ramp_hi-tboost_ramp_lo);
+         if (tboost_ramp > 1.0f)
+            tboost_ramp = 1.0f;
+         scale = 1.0f - tboost_ramp*(1.0f-scale);
+      } else {
+         scale = 1.0f;
+      }
+      boost_added = (opus_int32)(scale * (float)raw_boost);
       target += boost_added;
       if (audiff_knob_vbr_tdecay() > 0)
          audiff_carry = boost_added * (audiff_knob_vbr_tdecay()/100.0f);
