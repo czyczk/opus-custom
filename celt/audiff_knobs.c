@@ -11,28 +11,28 @@ static int env_int(const char *name, int dflt)
 int audiff_knob_adapt_intensity(void)
 {
    static int v = -2;
-   if (v == -2) v = env_int("AUDIFF_ADAPT_INTENSITY", 0);
+   if (v == -2) v = env_int("AUDIFF_ADAPT_INTENSITY", 1000);
    return v;
 }
 
 int audiff_knob_vbr_tboost(void)
 {
    static int v = -2;
-   if (v == -2) v = env_int("AUDIFF_VBR_TBOOST", 100);
+   if (v == -2) v = env_int("AUDIFF_VBR_TBOOST", 40);
    return v;
 }
 
 int audiff_knob_sustain_gate(void)
 {
    static int v = -2;
-   if (v == -2) v = env_int("AUDIFF_TBOOST_SUSTAIN_GATE", 0);
+   if (v == -2) v = env_int("AUDIFF_TBOOST_SUSTAIN_GATE", 1);
    return v;
 }
 
 int audiff_knob_sustain_ratio(void)
 {
    static int v = -2;
-   if (v == -2) v = env_int("AUDIFF_TBOOST_SUSTAIN_RATIO", 160);
+   if (v == -2) v = env_int("AUDIFF_TBOOST_SUSTAIN_RATIO", 80);
    return v;
 }
 
