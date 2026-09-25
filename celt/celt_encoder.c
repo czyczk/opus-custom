@@ -1057,7 +1057,8 @@ static celt_glog dynalloc_analysis(const celt_glog *bandLogE, const celt_glog *b
       int nbEBands, int start, int end, int C, int *offsets, int lsb_depth, const opus_int16 *logN,
       int isTransient, int vbr, int constrained_vbr, const opus_int16 *eBands, int LM,
       int effectiveBytes, opus_int32 *tot_boost_, int lfe, celt_glog *surround_dynalloc,
-      AnalysisInfo *analysis, int *importance, int *spread_weight, opus_val16 tone_freq, opus_val32 toneishness
+      AnalysisInfo *analysis, int *importance, int *spread_weight, opus_val16 tone_freq, opus_val32 toneishness,
+      float tonal_scale
       ARG_QEXT(int qext_scale))
 {
    int i, c;
@@ -1216,16 +1217,16 @@ static celt_glog dynalloc_analysis(const celt_glog *bandLogE, const celt_glog *b
 #else
          int freq_bin = (int)floor(.5 + QEXT_SCALE(tone_freq)*120/M_PI);
 #endif
-         for (i=start;i<end;i++) {
-            if (freq_bin >= eBands[i] && freq_bin <= eBands[i+1]) follower[i] += GCONST(2.f);
-            if (freq_bin >= eBands[i]-1 && freq_bin <= eBands[i+1]+1) follower[i] += GCONST(1.f);
-            if (freq_bin >= eBands[i]-2 && freq_bin <= eBands[i+1]+2) follower[i] += GCONST(1.f);
-            if (freq_bin >= eBands[i]-3 && freq_bin <= eBands[i+1]+3) follower[i] += GCONST(.5f);
-         }
-         if (freq_bin >= eBands[end]) {
-            follower[end-1] += GCONST(2.f);
-            follower[end-2] += GCONST(1.f);
-         }
+          for (i=start;i<end;i++) {
+             if (freq_bin >= eBands[i] && freq_bin <= eBands[i+1]) follower[i] += (celt_glog)(GCONST(2.f)*tonal_scale);
+             if (freq_bin >= eBands[i]-1 && freq_bin <= eBands[i+1]+1) follower[i] += (celt_glog)(GCONST(1.f)*tonal_scale);
+             if (freq_bin >= eBands[i]-2 && freq_bin <= eBands[i+1]+2) follower[i] += (celt_glog)(GCONST(1.f)*tonal_scale);
+             if (freq_bin >= eBands[i]-3 && freq_bin <= eBands[i+1]+3) follower[i] += (celt_glog)(GCONST(.5f)*tonal_scale);
+          }
+          if (freq_bin >= eBands[end]) {
+             follower[end-1] += (celt_glog)(GCONST(2.f)*tonal_scale);
+             follower[end-2] += (celt_glog)(GCONST(1.f)*tonal_scale);
+          }
       }
 #ifdef DISABLE_FLOAT_API
       (void)analysis;
@@ -1613,7 +1614,7 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
       int constrained_vbr, opus_val16 stereo_saving, int tot_boost,
       opus_val16 tf_estimate, int pitch_change, celt_glog maxDepth,
       int lfe, int has_surround_mask, celt_glog surround_masking,
-      celt_glog temporal_vbr, float audiff_hf_cur ARG_QEXT(int enable_qext))
+      celt_glog temporal_vbr, float audiff_hf_cur, float tonal_scale ARG_QEXT(int enable_qext))
 {
    /* The target rate in 8th bits per frame */
    opus_int32 target;
@@ -1693,9 +1694,9 @@ static int compute_vbr(const CELTMode *mode, AnalysisInfo *analysis, opus_int32 
 
       /* Tonality boost (compensating for the average). */
       tonal = MAX16(0.f,analysis->tonality-.15f)-0.12f;
-      tonal_target = target + (opus_int32)((coded_bins<<BITRES)*1.2f*tonal);
+      tonal_target = target + (opus_int32)((coded_bins<<BITRES)*1.2f*tonal*tonal_scale);
       if (pitch_change)
-         tonal_target +=  (opus_int32)((coded_bins<<BITRES)*.8f);
+         tonal_target +=  (opus_int32)((coded_bins<<BITRES)*.8f*tonal_scale);
       /*printf("%f %f ", analysis->tonality, tonal);*/
       target = tonal_target;
    }
@@ -1778,8 +1779,9 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
    celt_sig *prefilter_mem;
    celt_glog *oldBandE, *oldLogE, *oldLogE2, *energyError;
    int shortBlocks=0;
-   int isTransient=0;
-   float audiff_hf_energy_cur=0.0f;
+    int isTransient=0;
+    float audiff_hf_energy_cur=0.0f;
+    float audiff_tonal_scale=1.0f;
    const int CC = st->channels;
    const int C = st->stream_channels;
    int LM, M;
@@ -2298,9 +2300,30 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
    ALLOC(importance, nbEBands, int);
    ALLOC(spread_weight, nbEBands, int);
 
+   /* audiff v05: tonality-boost fade over the nominal bitrate.
+      Piecewise linear, full boost at/below LO, MIDVAL% at MID, fully
+      off at/above HI (and at OPUS_BITRATE_MAX).  At <=LO the scale is
+      exactly 1.0, so low-rate encodes stay bit-identical to stock
+      behaviour of this boost.  Judged on st->bitrate (constant within
+      an encode) rather than the per-frame equiv_rate. */
+   if (audiff_knob_tonal_fade())
+   {
+      opus_int32 br = st->bitrate;
+      int lo = audiff_knob_tonal_fade_lo();
+      int hi = audiff_knob_tonal_fade_hi();
+      int mid = audiff_knob_tonal_fade_mid();
+      int midval = audiff_knob_tonal_fade_midval();
+      float s;
+      if (br == OPUS_BITRATE_MAX || br >= hi) s = 0.0f;
+      else if (br <= lo) s = 1.0f;
+      else if (br <= mid) s = 1.0f - (1.0f - midval/100.0f) * (float)(br - lo)/(float)(mid - lo);
+      else s = (midval/100.0f) * (1.0f - (float)(br - mid)/(float)(hi - mid));
+      audiff_tonal_scale *= s;
+   }
    maxDepth = dynalloc_analysis(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C, offsets,
          st->lsb_depth, mode->logN, isTransient, st->vbr, st->constrained_vbr,
-         eBands, LM, effectiveBytes, &tot_boost, st->lfe, surround_dynalloc, &st->analysis, importance, spread_weight, tone_freq, toneishness ARG_QEXT(qext_scale));
+         eBands, LM, effectiveBytes, &tot_boost, st->lfe, surround_dynalloc, &st->analysis, importance, spread_weight, tone_freq, toneishness,
+         audiff_tonal_scale ARG_QEXT(qext_scale));
 
    ALLOC(tf_res, nbEBands, int);
    /* Disable variable tf resolution for hybrid and at very low bitrate */
@@ -2547,11 +2570,11 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
 
      if (!hybrid)
      {
-        target = compute_vbr(mode, &st->analysis, base_target, LM, equiv_rate,
-           st->lastCodedBands, C, st->intensity, st->constrained_vbr,
-           st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,
-           st->lfe, st->energy_mask!=NULL, surround_masking,
-           temporal_vbr, audiff_hf_energy_cur ARG_QEXT(st->enable_qext));
+         target = compute_vbr(mode, &st->analysis, base_target, LM, equiv_rate,
+            st->lastCodedBands, C, st->intensity, st->constrained_vbr,
+            st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,
+            st->lfe, st->energy_mask!=NULL, surround_masking,
+            temporal_vbr, audiff_hf_energy_cur, audiff_tonal_scale ARG_QEXT(st->enable_qext));
      } else {
         target = base_target;
         /* Tonal frames (offset<100) need more bits than noisy (offset>100) ones. */
@@ -2641,7 +2664,7 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
                   st->lastCodedBands, C, st->intensity, st->constrained_vbr,
                   st->stereo_saving, tot_boost, tf_estimate2, pitch_change, maxDepth,
                   st->lfe, st->energy_mask!=NULL, surround_masking,
-                  temporal_vbr, audiff_hf_energy_cur ARG_QEXT(st->enable_qext));
+                  temporal_vbr, audiff_hf_energy_cur, audiff_tonal_scale ARG_QEXT(st->enable_qext));
             target += tell;
          }
          scale = PSHR32(toneishness,14);
