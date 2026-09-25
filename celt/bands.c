@@ -38,6 +38,7 @@
 #include "cwrs.h"
 #include "stack_alloc.h"
 #include "os_support.h"
+#include "audiff_knobs.h"
 #include "mathops.h"
 #include "rate.h"
 #include "quant_bands.h"
@@ -738,9 +739,24 @@ static void compute_theta(struct band_ctx *ctx, struct split_ctx *sctx,
          side and mid. With just that parameter, we can re-scale both
          mid and side because we know that 1) they have unit norm and
          2) they are orthogonal. */
-      itheta_q30 = stereo_itheta(X, Y, stereo, N, ctx->arch);
-      itheta = itheta_q30>>16;
-   }
+       itheta_q30 = stereo_itheta(X, Y, stereo, N, ctx->arch);
+       itheta = itheta_q30>>16;
+       /* audiff v06: stereo theta floor.  The theta quantiser can round
+          true stereo content (de-correlated top-octave textures) down to
+          a near-zero angle, which turns the side channel into a scaled
+          copy of the mid and collapses the image toward the center.
+          Keeping a small floor (q14 units) on bands at or above the
+          configured band preserves side bits there; restricting the
+          floor to the upper bands matters, a floor on low/mid bands
+          only steals bits from the rest of the allocation. */
+       if (encode && stereo)
+       {
+          int fl = audiff_knob_theta_floor();
+          int flb = audiff_knob_theta_floor_band();
+          if (fl > 0 && ctx->i >= flb && itheta > 0 && itheta < fl)
+             itheta = fl;
+       }
+    }
    tell = ec_tell_frac(ec);
    if (qn!=1)
    {

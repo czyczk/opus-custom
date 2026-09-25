@@ -91,3 +91,17 @@ int audiff_knob_budgetgate_base(void)
    if (v == -2) v = env_int("AUDIFF_BUDGETGATE_BASE", 8);
    return v;
 }
+
+int audiff_knob_theta_floor(void)
+{
+   static int v = -2;
+   if (v == -2) v = env_int("AUDIFF_THETA_FLOOR", 2730);
+   return v;
+}
+
+int audiff_knob_theta_floor_band(void)
+{
+   static int v = -2;
+   if (v == -2) v = env_int("AUDIFF_THETA_FLOOR_BAND", 16);
+   return v;
+}
