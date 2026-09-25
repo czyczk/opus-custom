@@ -18,5 +18,7 @@ int audiff_knob_tonal_fade_lo(void);
 int audiff_knob_tonal_fade_mid(void);
 int audiff_knob_tonal_fade_midval(void);
 int audiff_knob_tonal_fade_hi(void);
+int audiff_knob_adapt_budgetgate(void);
+int audiff_knob_budgetgate_base(void);
 
 #endif

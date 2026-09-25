@@ -77,3 +77,17 @@ int audiff_knob_tonal_fade_hi(void)
    if (v == -2) v = env_int("AUDIFF_TONAL_FADE_HI", 320000);
    return v;
 }
+
+int audiff_knob_adapt_budgetgate(void)
+{
+   static int v = -2;
+   if (v == -2) v = env_int("AUDIFF_ADAPT_BUDGETGATE", 1);
+   return v;
+}
+
+int audiff_knob_budgetgate_base(void)
+{
+   static int v = -2;
+   if (v == -2) v = env_int("AUDIFF_BUDGETGATE_BASE", 8);
+   return v;
+}

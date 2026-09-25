@@ -91,6 +91,11 @@ struct OpusCustomEncoder {
    float audiff_ic_ema;
    int audiff_exit_state;
 
+   /* audiff v06: budget gate state (exit-clamp suppression backoff). */
+   int audiff_gate_suppress;
+   int audiff_gate_backoff;
+   int audiff_gate_lastclamp;
+
    /* Everything beyond this point gets cleared on a reset */
 #define ENCODER_RESET_START rng
 
@@ -226,6 +231,9 @@ static int opus_custom_encoder_init_arch(CELTEncoder *st, const CELTMode *mode,
    st->lsb_depth=24;
    st->audiff_ic_ema = 1.0f;
    st->audiff_exit_state = 0;
+   st->audiff_gate_suppress = 0;
+   st->audiff_gate_backoff = audiff_knob_budgetgate_base();
+   st->audiff_gate_lastclamp = 0;
 
 #ifdef ENABLE_QEXT
    if (st->mode->Fs == 96000 && (mode->shortMdctSize==240 || mode->shortMdctSize==180)) st->qext_scale = 2;
@@ -2479,11 +2487,26 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
       st->intensity = hysteresis_decision((opus_val16)(equiv_rate/1000),
             intensity_thresholds, intensity_histeresis, 21, st->intensity);
       st->intensity = IMIN(end,IMAX(start, st->intensity));
-      if (CC == 2 && audiff_knob_adapt_intensity() > 0 && st->intensity < end)
+      /* audiff v06: apply the adapt4 override AFTER the hysteresis
+         decision.  Overriding before it lets the hysteresis take the
+         override as its previous value and pull it right back on the
+         next frame, which showed up as a 20/21 intensity flip every
+         two frames on edge content.  With the override after, the
+         hysteresis never sees it and the exit holds steady.  While
+         the budget gate is backing off after a clamped exit,
+         exit_state 2 keeps this frame on the hysteresis value. */
+      if (audiff_knob_adapt_budgetgate() && st->audiff_exit_state == 1 && st->audiff_gate_suppress > 0)
+         st->audiff_exit_state = 2;
+      if (st->audiff_exit_state == 1)
+         st->intensity = end;
+      if (CC == 2 && audiff_knob_adapt_intensity() > 0)
       {
          /* audiff v04 adapt4: content-adaptive intensity-stereo exit.
             Predict intensity IC error and leave intensity stereo on
-            de-correlated wide-band content. */
+            de-correlated wide-band content.  The IC estimate is
+            updated every frame (also while the hysteresis alone would
+            already code full stereo) so the exit state keeps tracking
+            the content. */
          float *pic_ema = &st->audiff_ic_ema;
          int *pexit_state = &st->audiff_exit_state;
          double fc = (double)(mode->eBands[st->intensity]<<LM) * 24000.0 / N;
@@ -2515,8 +2538,6 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
             if (!*pexit_state && *pic_ema < thr-0.05) *pexit_state = 1;
             else if (*pexit_state && *pic_ema > thr+0.05) *pexit_state = 0;
          }
-         if (*pexit_state)
-            st->intensity = end;
       }
    }
 
@@ -2741,6 +2762,30 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
    codedBands = clt_compute_allocation(mode, start, end, offsets, cap,
          alloc_trim, &st->intensity, &dual_stereo, bits, &balance, pulses,
          fine_quant, fine_priority, C, LM, enc, 1, st->lastCodedBands, signalBandwidth);
+   /* audiff v06: budget gate.  When an adapt4 exit keeps getting clamped
+      by the allocation (visible here as st->intensity pulled back below
+      end), stop re-attempting the exit: two clamps in a row open a
+      suppression window that doubles on every repeat (base frames up
+      to 400).  Keeps the top octave from flapping between intensity
+      stereo and full stereo on content the rate cannot afford, at
+      zero bitrate cost. */
+   if (audiff_knob_adapt_budgetgate() && CC == 2)
+   {
+      int clamped = (st->audiff_exit_state == 1 && st->intensity < end);
+      if (clamped) {
+         if (st->audiff_gate_lastclamp) {
+            st->audiff_gate_suppress = st->audiff_gate_backoff;
+            st->audiff_gate_backoff = IMIN(400, st->audiff_gate_backoff * 2);
+            st->audiff_gate_lastclamp = 0;
+         } else {
+            st->audiff_gate_lastclamp = 1;
+         }
+      } else {
+         st->audiff_gate_lastclamp = 0;
+      }
+      if (st->audiff_gate_suppress > 0)
+         st->audiff_gate_suppress--;
+   }
    if (st->lastCodedBands)
       st->lastCodedBands = IMIN(st->lastCodedBands+1,IMAX(st->lastCodedBands-1,codedBands));
    else
