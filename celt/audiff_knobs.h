@@ -1,12 +1,11 @@
 #ifndef AUDIFF_KNOBS_H
 #define AUDIFF_KNOBS_H
 
-/* v05 / SenaV m2 knob surface.  Defaults = frozen v05 profile
-   (adapt4=1000, tb40, sustain gate@80, td0); env vars still override.
-
-   v05 completion: tonality-boost fade over bitrate (piecewise linear,
-   <=128k full boost, 192k 30%, >=320k off; judged on the nominal
-   bitrate so it is constant within an encode). */
+/* v06 / SenaV m3 knob surface.  Defaults = frozen profile
+   (adapt4=1000 restructured + budget gate on, tb40, sustain gate@80,
+   td0, tonal fade on, theta floor 2730@b>=16); env vars still override.
+   Topband stereo (0=off, else floor rate in kbps) is armed by the
+   caller when the budget tier calls for it. */
 
 int audiff_knob_adapt_intensity(void);
 int audiff_knob_vbr_tboost(void);
@@ -22,5 +21,6 @@ int audiff_knob_adapt_budgetgate(void);
 int audiff_knob_budgetgate_base(void);
 int audiff_knob_theta_floor(void);
 int audiff_knob_theta_floor_band(void);
+int audiff_knob_topband_stereo(void);
 
 #endif

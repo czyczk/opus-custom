@@ -2589,14 +2589,78 @@ int celt_encode_with_ec(CELTEncoder * OPUS_RESTRICT st, const opus_res * pcm, in
      if (st->constrained_vbr)
         base_target += (st->vbr_offset>>lm_diff);
 
-     if (!hybrid)
-     {
+      if (!hybrid)
+      {
          target = compute_vbr(mode, &st->analysis, base_target, LM, equiv_rate,
             st->lastCodedBands, C, st->intensity, st->constrained_vbr,
             st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,
             st->lfe, st->energy_mask!=NULL, surround_masking,
             temporal_vbr, audiff_hf_energy_cur, audiff_tonal_scale ARG_QEXT(st->enable_qext));
-     } else {
+         /* audiff v06: topband stereo guarantee.  Armed by the caller
+            when the budget tier calls for it.  On an adapt4 exit frame
+            (intensity stereo dropped, top bands coded as true stereo)
+            the whole-frame budget is raised so the top bands actually
+            keep stereo precision:
+            - below the deficit threshold the frame target is floored
+              at the given rate; raising the nominal rate instead
+              mostly leaks into the low/mid bands, so the floor has to
+              be this blunt;
+            - at/above it, a dry-run allocation measures the top-band
+              pulse deficit and only that deficit is added (pass one
+              damps the estimate at 200%, pass two corrects near 1:1).
+            Intended for unconstrained VBR; a constrained-VBR clamp can
+            sit below the floor. */
+         if (CC == 2 && st->audiff_exit_state == 1
+               && audiff_knob_topband_stereo() > 0)
+         {
+            if (st->bitrate == OPUS_BITRATE_MAX || st->bitrate >= 192000)
+            {
+               opus_int32 trial_bits = target - (4<<BITRES);
+               if (trial_bits > (100<<BITRES)) {
+                  /* target has no tell added yet at this point: the
+                     trial budget is the bare target, minus only a
+                     byte-rounding margin; subtracting tell here would
+                     double-count and overshoot. */
+                  unsigned char _scratch[1276];
+                  ec_ctx _dec;
+                  VARDECL(int, tpulses);
+                  VARDECL(int, tebits);
+                  VARDECL(int, tfprio);
+                  int inten_copy, dual_copy, bal_copy;
+                  opus_int32 want = (opus_int32)1024<<BITRES;
+                  int pass;
+                  ALLOC(tpulses, nbEBands, int);
+                  ALLOC(tebits, nbEBands, int);
+                  ALLOC(tfprio, nbEBands, int);
+                  for (pass = 0; pass < 2; pass++) {
+                     opus_int32 got, deficit, add;
+                     /* reset the copies every pass: the allocation
+                        clamps intensity in place, and retrying from a
+                        clamped copy overstates the deficit */
+                     inten_copy = st->intensity;
+                     dual_copy = dual_stereo;
+                     bal_copy = 0;
+                     ec_enc_init(&_dec, _scratch, sizeof(_scratch));
+                     /* signalBandwidth is not assigned yet here; end-1
+                        (full bandwidth) is what the probe wants */
+                     (void)clt_compute_allocation(mode, start, end, offsets, cap,
+                           alloc_trim, &inten_copy, &dual_copy, trial_bits, &bal_copy, tpulses,
+                           tebits, tfprio, C, LM, &_dec, 1, st->lastCodedBands, end-1);
+                     got = (opus_int32)tpulses[end-2]+tpulses[end-1];
+                     if (got >= want) break;
+                     deficit = want-got;
+                     add = pass == 0 ? deficit*2 : deficit+(deficit>>2);
+                     target += add;
+                     trial_bits += add;
+                  }
+               }
+            } else {
+               int tgt = IMIN(audiff_knob_topband_stereo(), 500);
+               opus_int32 floor_bits = (opus_int32)tgt * frame_size * 1000 / mode->Fs;
+               target = IMAX(target, floor_bits<<BITRES);
+            }
+         }
+      } else {
         target = base_target;
         /* Tonal frames (offset<100) need more bits than noisy (offset>100) ones. */
         if (st->silk_info.offset < 100) target += 12 << BITRES >> (3-LM);

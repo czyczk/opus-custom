@@ -105,3 +105,10 @@ int audiff_knob_theta_floor_band(void)
    if (v == -2) v = env_int("AUDIFF_THETA_FLOOR_BAND", 16);
    return v;
 }
+
+int audiff_knob_topband_stereo(void)
+{
+   static int v = -2;
+   if (v == -2) v = env_int("AUDIFF_TOPBAND_STEREO", 0);
+   return v;
+}
