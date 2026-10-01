@@ -373,6 +373,18 @@ def prepare_dependencies() -> dict[str, pathlib.Path]:
     return srcs
 
 
+def opus_commit_id() -> str:
+    """Short git hash of this opus-custom checkout, baked into the SenaV
+    version string so a binary always reports its exact libopus provenance.
+    'unknown' when built from an exported tree (no .git)."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, check=True)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def stage_opus_source() -> pathlib.Path:
     """Copy the current working tree (including uncommitted edits) once and
     pin the package version so the binary reports `libopus 1.6.1`."""
@@ -533,7 +545,7 @@ install(FILES "${{OPE_SRC}}/include/opusenc.h" DESTINATION include/opus)
 
 def write_opusenc_project(dst: pathlib.Path, tools_src: pathlib.Path,
                           ope_src: pathlib.Path, prefix: pathlib.Path,
-                          windows: bool = False) -> None:
+                          windows: bool = False, commit: str = "unknown") -> None:
     dst.mkdir(parents=True, exist_ok=True)
     tools_text = cmake_path_text(tools_src, windows)
     ope_text = cmake_path_text(ope_src, windows)
@@ -571,7 +583,8 @@ target_include_directories(opusenc-senav PRIVATE
 target_compile_definitions(opusenc-senav PRIVATE
   PACKAGE_NAME="opus-tools"
   PACKAGE_VERSION="0.2"
-  HAVE_LIBFLAC)
+  HAVE_LIBFLAC
+  SENAV_OPUS_COMMIT="{commit}")
 if(WIN32)
   target_compile_definitions(opusenc-senav PRIVATE
     FLAC__NO_DLL
@@ -619,7 +632,7 @@ def build_libopusenc(spec: BuildSpec, ope_src: pathlib.Path,
 def build_opusenc(spec: BuildSpec, tools_src: pathlib.Path, ope_src: pathlib.Path,
                   project: pathlib.Path, build: pathlib.Path) -> pathlib.Path:
     write_opusenc_project(project, tools_src, ope_src, spec.prefix,
-                          spec.windows_paths)
+                          spec.windows_paths, commit=opus_commit_id())
     extra = []
     if spec.release_flags:
         extra.append(f"-DCMAKE_C_FLAGS_RELEASE={' '.join(spec.release_flags)}")
